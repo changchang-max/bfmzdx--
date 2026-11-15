@@ -1,0 +1,113 @@
+# ─── 依赖 ────────────────────────────────────────────
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/install-state.gz
+
+# 依赖锁文件需要提交，不要忽略：package-lock.json
+
+# ─── 运行时产物（本项目的真实数据，绝不入库）──────────
+# 打卡照片上传缓存（server/src/server.mjs 写入）
+.uploads/
+
+# 调试截图 / 页面快照 / 日志 / state.json（含会话与打卡状态）
+artifacts/
+
+# 服务端产生的其它运行目录
+data/
+tmp/
+temp/
+sessions/
+storage/
+cache/
+.logs/
+
+# ─── 敏感信息：账号、会话、Cookie ────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+credentials.json
+auth.json
+*.har
+cookies.txt
+cookies.json
+storage-state.json
+state.json
+state-*.json
+*.session
+*.session.json
+
+# ─── 日志 ────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ─── 测试 / Playwright ──────────────────────────────
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+.playwright/
+coverage/
+.nyc_output/
+
+# ─── 进程与端口调试产物 ──────────────────────────────
+*.pid
+*.pid.lock
+*.seed
+*.stackdump
+core
+core.*
+
+# ─── 编辑器 / IDE ────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+.idea/
+*.iml
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.history/
+
+# ─── 操作系统 ────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ─── 杂项临时文件 ────────────────────────────────────
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*~
+_*.html
+._*
+*.crdownload
+*.part
+*.partial
+
+# ─── 压缩包 / 备份（避免误提交大数据）───────────────
+*.zip
+*.7z
+*.rar
+*.tar.gz
+*.tgz

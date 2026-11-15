@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<meta name="theme-color" content="#0891B2" />
+<title>智能查寝 · 打卡助手</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230891B2'/%3E%3Cpath d='M16 7l7 4v6c0 5-3.4 7.6-7 9-3.6-1.4-7-4-7-9v-6l7-4z' fill='%23fff' opacity='.92'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div class="app" id="app">
+  <header class="hero">
+    <div class="hero-badge" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3l7 3.5v5.2c0 4.6-3 7.7-7 9.3-4-1.6-7-4.7-7-9.3V6.5L12 3z" />
+        <path d="M8.8 12.2l2.2 2.2 4.2-4.6" />
+      </svg>
+    </div>
+    <div class="hero-text">
+      <h1>智能查寝 · 打卡助手</h1>
+      <p>虚拟定位选点 · 上传照片 · 一键完成归宿打卡</p>
+    </div>
+  </header>
+
+  <main>
+    <!-- ============ 登录 ============ -->
+    <section class="view" id="view-login">
+      <form class="card" id="login-form" novalidate>
+        <h2 class="card-title">统一身份认证登录</h2>
+        <p class="card-sub">使用学校统一认证的学号与密码，登录后仅在本机内存中保持会话。</p>
+
+        <label class="field">
+          <span class="field-label">学号</span>
+          <input id="username" name="username" type="text" inputmode="numeric" autocomplete="username"
+                 placeholder="请输入学号" required />
+        </label>
+
+        <label class="field">
+          <span class="field-label">密码</span>
+          <span class="field-input-wrap">
+            <input id="password" name="password" type="password" autocomplete="current-password"
+                   placeholder="请输入智慧校园密码" required />
+            <button type="button" class="ghost-eye" id="toggle-password" aria-label="显示或隐藏密码">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12z" />
+                <circle cx="12" cy="12" r="3.2" />
+              </svg>
+            </button>
+          </span>
+        </label>
+
+        <label class="check">
+          <input type="checkbox" id="remember" checked />
+          <span>记住学号（密码不会保存）</span>
+        </label>
+
+        <button class="btn btn-primary" id="login-btn" type="submit">
+          <span class="btn-label">登录并加载查寝信息</span>
+        </button>
+
+        <div class="note" id="login-error" role="alert" hidden></div>
+        <p class="hint">首次登录需要 5–20 秒建立浏览器会话，请勿关闭页面。</p>
+      </form>
+
+      <div class="card card-quiet">
+        <h3 class="mini-title">它能做什么</h3>
+        <ul class="bullets">
+          <li>地图上自选位置，自动对齐学校签到点范围（东1—东4、西1—西2 学生社区等）</li>
+          <li>手机拍照或从相册选图作为打卡照片</li>
+          <li>定位与照片均由服务端在真实页面里注入，然后提交官方接口</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 主界面 ============ -->
+    <section class="view hidden" id="view-app">
+      <div class="card profile" id="profile-card">
+        <div class="profile-main">
+          <div class="avatar" id="avatar">董</div>
+          <div class="profile-text">
+            <div class="profile-name" id="p-name">—</div>
+            <div class="profile-meta" id="p-meta">—</div>
+          </div>
+          <button class="ghost-btn" id="refresh-btn" type="button" aria-label="刷新查寝状态">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 12a8 8 0 1 1-2.6-5.9" /><path d="M20 4.5V10h-5.4" />
+            </svg>
+            刷新
+          </button>
+          <button class="ghost-btn" id="logout-btn" type="button">退出</button>
+        </div>
+        <div class="chips" id="status-chips"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2 class="card-title">选择打卡位置</h2>
+          <button class="ghost-btn" id="gps-btn" type="button">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3.2" /><path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3" />
+            </svg>
+            用手机定位
+          </button>
+        </div>
+        <p class="card-sub">点击地图或拖动蓝色标记选点，虚线圆为签到允许范围。</p>
+
+        <div class="chips chips-scroll" id="point-chips"></div>
+
+        <div class="map-wrap">
+          <div id="map" class="map" role="application" aria-label="签到点地图"></div>
+          <div class="map-legend">
+            <span><i class="dot dot-brand"></i>签到范围</span>
+            <span><i class="dot dot-pick"></i>我的选点</span>
+          </div>
+        </div>
+
+        <div class="range-bar" id="range-bar">
+          <span class="range-dot" id="range-dot"></span>
+          <span id="range-text">正在读取签到点…</span>
+        </div>
+        <div class="coord" id="coord-text">—</div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2 class="card-title">打卡照片</h2>
+          <span class="pill" id="photo-pill">未选择</span>
+        </div>
+        <p class="card-sub">需为本人出镜的宿舍照片，与官方要求一致。</p>
+
+        <div class="photo-grid">
+          <label class="photo-tile" id="tile-camera">
+            <input type="file" id="file-camera" accept="image/*" capture="environment" hidden />
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3.5 8.5h3l1.6-2.2h7.8L17.5 8.5h3v10H3.5v-10z" /><circle cx="12" cy="13.2" r="3.4" />
+            </svg>
+            <span>拍照</span>
+          </label>
+          <label class="photo-tile" id="tile-album">
+            <input type="file" id="file-album" accept="image/*" hidden />
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3.5" y="5" width="17" height="14" rx="2.5" /><circle cx="9" cy="10" r="1.6" /><path d="M4.5 17l4.6-4.4 3.2 3 2.6-2.4 4.6 4" />
+            </svg>
+            <span>相册</span>
+          </label>
+          <div class="photo-preview hidden" id="photo-preview">
+            <img id="photo-img" alt="打卡照片预览" />
+            <button class="photo-remove" id="photo-remove" type="button" aria-label="移除照片">×</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="action-bar">
+        <button class="btn btn-cta" id="checkin-btn" type="button" disabled>
+          <span class="btn-label">打卡</span>
+        </button>
+        <p class="action-hint" id="action-hint">请选择位置并上传照片</p>
+      </div>
+
+      <div class="card hidden" id="result-card">
+        <div class="card-head">
+          <h2 class="card-title" id="result-title">打卡结果</h2>
+          <button class="ghost-btn" id="result-close" type="button">收起</button>
+        </div>
+        <p class="result-msg" id="result-msg"></p>
+        <ol class="steps" id="result-steps"></ol>
+      </div>
+
+      <p class="footer-note">本工具仅用于本机自用；打卡仍受学校服务端时间窗与签到点范围校验。</p>
+    </section>
+  </main>
+
+  <div class="overlay hidden" id="overlay" role="status" aria-live="polite">
+    <div class="overlay-box">
+      <div class="spinner" aria-hidden="true"></div>
+      <p class="overlay-title" id="overlay-title">正在登录…</p>
+      <p class="overlay-sub" id="overlay-sub">建立浏览器会话，请稍候</p>
+    </div>
+  </div>
+</div>
+
+<script src="/vendor/leaflet/leaflet.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

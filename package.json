@@ -1,0 +1,20 @@
+{
+  "name": "nmu-zncq-checkin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "北方民族大学智能查寝：移动端虚拟定位 + 照片上传自动打卡",
+  "main": "server/src/server.mjs",
+  "scripts": {
+    "start": "node server/src/server.mjs",
+    "dev": "node --watch server/src/server.mjs",
+    "cli": "node server/src/cli.mjs",
+    "env:check": "node server/src/env.mjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "leaflet": "^1.9.4",
+    "multer": "^2.0.2",
+    "playwright": "^1.56.1"
+  }
+}
