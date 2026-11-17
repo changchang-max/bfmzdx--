@@ -22,26 +22,80 @@ export const ROUTE = '#/xscq/kqqdx';
 const UA_MOBILE =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 
+/**
+ * 共享浏览器实例
+ *
+ * 关键点：launch() 成功后浏览器进程可能随时退出（Chromium 崩溃、被任务管理器结束、
+ * 系统回收内存）。旧实现把 Promise 永久缓存下来，页面关闭后这个 Promise 依然 resolve
+ * 出一个已经 close() 的 Browser，于是下一次 /api/login 直接在
+ * `browser.newContext()` 抛「Target page, context or browser has been closed」。
+ *
+ * 现在改为：监听 'disconnected' 主动作废缓存 + 取用前检查 isConnected()，
+ * 失效即重新启动；launch 时勾选 handleSIGHUP/SIGINT/SIGTERM，Node 退出时自动收尸，
+ * 避免上次运行留下的孤儿 Chromium 占用资源。
+ */
 let browserPromise = null;
-export function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = chromium.launch({
-      headless: true,
-      args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-    });
+
+function discardBrowser(expected) {
+  if (expected === undefined || browserPromise === expected) browserPromise = null;
+}
+
+function launchBrowser() {
+  const p = chromium.launch({
+    headless: true,
+    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'],
+    handleSIGHUP: false, // 由 server.mjs 的 shutdown() 统一收尾，避免 Ctrl+C 时和关闭流程抢
+    handleSIGINT: false,
+    handleSIGTERM: false,
+  });
+  browserPromise = p;
+  // 启动失败：清掉缓存，下次调用重试
+  p.catch(() => discardBrowser(p));
+  // 启动成功后监听断开：浏览器自己死了就让缓存失效
+  p.then((b) => {
+    b.on('disconnected', () => discardBrowser(p));
+  }).catch(() => {});
+  return p;
+}
+
+/** 取一个可用浏览器；实例已关闭时自动重启 */
+export async function getBrowser() {
+  const p = browserPromise || launchBrowser();
+  let browser;
+  try {
+    browser = await p;
+  } catch (e) {
+    discardBrowser(p);
+    const err = new Error(`无法启动 Chromium（Playwright）：${e.message}`);
+    err.code = 'BROWSER_LAUNCH_FAILED';
+    throw err;
   }
-  return browserPromise;
+  if (browser.isConnected()) return browser;
+  discardBrowser(p);
+  return getBrowser(); // 已断开：重新启动一次
 }
 
 export async function closeBrowser() {
-  if (browserPromise) {
-    const b = await browserPromise.catch(() => null);
-    browserPromise = null;
-    if (b) await b.close().catch(() => {});
-  }
+  const p = browserPromise;
+  browserPromise = null;
+  if (!p) return;
+  const b = await p.catch(() => null);
+  if (b && b.isConnected()) await b.close().catch(() => {});
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 页面/浏览器被关掉时的错误，统一转成可读的会话失效 */
+function isClosedError(e) {
+  const msg = String((e && e.message) || '');
+  return /Target page, context or browser has been closed|Target closed|browser has been closed|Browser closed/i.test(msg);
+}
+
+function closedError() {
+  const err = new Error('浏览器会话已断开（Chromium 被关闭或崩溃），请重新登录');
+  err.code = 'BROWSER_CLOSED';
+  return err;
+}
 
 /** 页面初始化脚本：接管 navigator.geolocation 与 SDK.getCurrentPosition，实现虚拟定位 */
 function geoSpoofScript() {
@@ -106,8 +160,34 @@ export class NmuSession {
     this.lastUsed = Date.now();
   }
 
+  /** 会话是否还能用（浏览器连接 + 上下文 + 页面都没被关） */
+  isAlive() {
+    const page = this.page;
+    return !!(page && !page.isClosed() && this.ctx && this.ctx.browser() && this.ctx.browser().isConnected());
+  }
+
   async login(username, password) {
     this.username = username;
+    try {
+      await this.openBrowser();
+      await this.page.goto(INDEX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await sleep(800);
+
+      if (/cas\.nmu\.edu\.cn/.test(this.page.url())) {
+        await this.casLogin(username, password);
+      }
+      await this.waitApp();
+      const state = await this.state();
+      this.lastState = state;
+      return state;
+    } catch (e) {
+      if (isClosedError(e)) throw closedError();
+      throw e;
+    }
+  }
+
+  /** 建立上下文与页面；浏览器已被关掉时自动换一个新实例 */
+  async openBrowser() {
     const browser = await getBrowser();
     this.ctx = await browser.newContext({
       userAgent: UA_MOBILE,
@@ -123,17 +203,11 @@ export class NmuSession {
     await this.ctx.addInitScript(geoSpoofScript);
     this.page = await this.ctx.newPage();
     this.page.setDefaultTimeout(45000);
-
-    await this.page.goto(INDEX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await sleep(800);
-
-    if (/cas\.nmu\.edu\.cn/.test(this.page.url())) {
-      await this.casLogin(username, password);
-    }
-    await this.waitApp();
-    const state = await this.state();
-    this.lastState = state;
-    return state;
+    // 页面被外部关闭时主动置空，后续调用能立刻判断出会话失效，而不是等到超时
+    this.page.on('close', () => {
+      if (this.page && this.page.isClosed()) this.page = null;
+    });
+    return this.page;
   }
 
   async casLogin(username, password) {
@@ -154,14 +228,16 @@ export class NmuSession {
 
     try {
       await nav;
-    } catch {
+    } catch (e) {
+      if (isClosedError(e)) throw closedError();
       const txt = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ')).catch(() => '');
       if (captchaVisible || /验证码/.test(txt)) {
         const err = new Error('统一认证要求输入图形验证码（同一网络登录失败次数过多），请先在浏览器里手动登录一次再试');
         err.code = 'CAPTCHA';
         throw err;
       }
-      const m = txt.match(/(用户名|密码|账号)[^。]{0,40}?(错误|不正确|锁定|过期)/);
+      // CAS 的错误提示里也可能带「验证码」字样（如「手机动态码」），所以验证码判断放前面
+      const m = txt.match(/(?:用户名|密码|账号密码|账号)[^。]{0,20}?(?:错误|不正确|锁定|过期)/);
       const err = new Error(m ? `统一认证登录失败：${m[0]}` : `统一认证登录失败：${txt.slice(0, 120) || '超时'}`);
       err.code = 'LOGIN_FAILED';
       throw err;
@@ -193,6 +269,7 @@ export class NmuSession {
         { timeout: 45000 },
       );
     } catch (e) {
+      if (isClosedError(e)) throw closedError();
       const txt = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ')).catch(() => '');
       const err = new Error(`进入智能查寝页面失败：${txt.slice(0, 150)}`);
       err.code = 'APP_LOAD_FAILED';
@@ -200,9 +277,35 @@ export class NmuSession {
     }
   }
 
+  /**
+   * 执行页面脚本；页面/浏览器被关掉时转成 BROWSER_CLOSED，
+   * 并顺手把失活的上下文清掉，避免后续请求在死页面上反复卡超时
+   */
+  async evaluate(fn, arg) {
+    const page = this.page;
+    if (page && page.isClosed()) {
+      await this.close();
+      throw closedError();
+    }
+    try {
+      return await page.evaluate(fn, arg);
+    } catch (e) {
+      if (isClosedError(e)) {
+        this.ctx = null;
+        this.page = null;
+        throw closedError();
+      }
+      throw e;
+    }
+  }
+
   /** 读取服务端 getKqInfo 原始数据 + 页面组件状态 */
   async state() {
-    const raw = await this.page.evaluate(async () => {
+    if (!this.isAlive()) {
+      await this.close();
+      throw closedError();
+    }
+    const raw = await this.evaluate(async () => {
       const r = await fetch('/xsfw/sys/swmzncqapp/kqController/getKqInfo.do', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
@@ -216,8 +319,7 @@ export class NmuSession {
       err.code = 'STATE_FAILED';
       throw err;
     }
-    const vm = await this.page
-      .evaluate(() => {
+    const vm = await this.evaluate(() => {
         const el = document.querySelector('#kqqd-smkq');
         const v = el && el.__vue__;
         if (!v) return null;
@@ -282,7 +384,7 @@ export class NmuSession {
 
   /** 注入虚拟定位（BD09），并触发前端重新计算「是否在签到范围」 */
   async applyLocation(lng, lat) {
-    await this.page.evaluate(
+    await this.evaluate(
       ({ lng, lat }) => {
         window.__VIRTUAL_GEO__ = { lng, lat };
         window.curlng = lng;
@@ -295,7 +397,7 @@ export class NmuSession {
     );
     // 等待前端把 inPostion / address 算出来
     await sleep(2500);
-    return this.page.evaluate(() => {
+    return this.evaluate(() => {
       const el = document.querySelector('#kqqd-smkq');
       const v = el && el.__vue__;
       return v ? { inPostion: !!v.inPostion, address: v.address || '', canSign: !!v.canSign } : {};
@@ -305,24 +407,29 @@ export class NmuSession {
   /** 上传打卡照片，返回 DZ_DKZP 令牌 */
   async uploadPhoto(filePath) {
     const page = this.page;
-    const input = page.locator('#kqqd-smkq input[type=file]').first();
-    await input.waitFor({ state: 'attached', timeout: 20000 });
-    await input.setInputFiles(filePath);
-    await page.waitForFunction(
-      () => {
-        const el = document.querySelector('#kqqd-smkq');
-        const v = el && el.__vue__;
-        return !!(v && v.formValue && v.formValue.DZ_DKZP);
-      },
-      null,
-      { timeout: 45000 },
-    );
-    return page.evaluate(() => document.querySelector('#kqqd-smkq').__vue__.formValue.DZ_DKZP);
+    try {
+      const input = page.locator('#kqqd-smkq input[type=file]').first();
+      await input.waitFor({ state: 'attached', timeout: 20000 });
+      await input.setInputFiles(filePath);
+      await page.waitForFunction(
+        () => {
+          const el = document.querySelector('#kqqd-smkq');
+          const v = el && el.__vue__;
+          return !!(v && v.formValue && v.formValue.DZ_DKZP);
+        },
+        null,
+        { timeout: 45000 },
+      );
+    } catch (e) {
+      if (isClosedError(e)) throw closedError();
+      throw e;
+    }
+    return this.evaluate(() => document.querySelector('#kqqd-smkq').__vue__.formValue.DZ_DKZP);
   }
 
   /** 提交打卡 */
   async submit({ lng, lat, qddd, address, token }) {
-    return this.page.evaluate(
+    return this.evaluate(
       async (payload) => {
         const r = await fetch('/xsfw/sys/swmzncqapp/kqController/addKqInfo.do', {
           method: 'POST',
@@ -442,9 +549,11 @@ export class NmuSession {
   }
 
   async close() {
-    if (this.ctx) await this.ctx.close().catch(() => {});
+    // 只关掉自己的上下文，共享浏览器留给后续会话复用
+    const ctx = this.ctx;
     this.ctx = null;
     this.page = null;
+    if (ctx) await ctx.close().catch(() => {});
   }
 }
 

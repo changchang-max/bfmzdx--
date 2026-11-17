@@ -42,6 +42,13 @@ function newSid() {
 function pickSession(sid) {
   const rec = sessions.get(sid);
   if (!rec) return null;
+  // 浏览器/页面已经被关掉：直接判失效并清掉，避免后续操作在死页面上卡到超时
+  if (typeof rec.session.isAlive === 'function' && !rec.session.isAlive()) {
+    sessions.delete(sid);
+    rec.session.close().catch(() => {});
+    console.log('[session] 浏览器已断开，作废会话', String(sid).slice(0, 8));
+    return null;
+  }
   rec.lastUsed = Date.now();
   rec.session.touch();
   return rec.session;
@@ -61,6 +68,22 @@ setInterval(async () => {
 
 const fail = (res, code, message, extra = {}) => res.json({ ok: false, code, message, ...extra });
 
+/** 会话已失效（含浏览器断开）时统一回收，前端据此回到登录页 */
+function dropSession(sid, s) {
+  if (sid) sessions.delete(sid);
+  if (s) s.close().catch(() => {});
+}
+
+/** 把 Playwright 的「Target … has been closed」翻译成前端能看懂的话 */
+function normalizeError(e) {
+  const code = (e && e.code) || '';
+  const msg = (e && e.message) || '服务器内部错误';
+  if (code === 'BROWSER_CLOSED' || /Target page, context or browser has been closed|Target closed|browser has been closed/i.test(msg)) {
+    return { code: 'BROWSER_CLOSED', message: '浏览器会话已断开（Chromium 被关闭或崩溃），请重新登录' };
+  }
+  return { code: code || 'SERVER_ERROR', message: msg };
+}
+
 app.get('/api/health', (_req, res) => res.json({ ok: true, uptime: process.uptime(), sessions: sessions.size }));
 
 // 登录（为每个用户建立独立的浏览器会话）
@@ -76,19 +99,23 @@ app.post('/api/login', async (req, res) => {
     res.json({ ok: true, sid, state });
   } catch (e) {
     await session.close().catch(() => {});
-    console.error('[login] 失败', e.code, e.message);
-    fail(res, e.code || 'LOGIN_ERROR', e.message || '登录失败');
+    const { code, message } = normalizeError(e);
+    console.error('[login] 失败', code, message);
+    fail(res, code, message);
   }
 });
 
 app.get('/api/state', async (req, res) => {
-  const s = pickSession(req.query.sid);
+  const sid = req.query.sid;
+  const s = pickSession(sid);
   if (!s) return fail(res, 'NO_SESSION', '会话已失效，请重新登录');
   try {
     const state = await s.state();
     res.json({ ok: true, state });
   } catch (e) {
-    fail(res, e.code || 'STATE_ERROR', e.message);
+    const { code, message } = normalizeError(e);
+    if (code === 'BROWSER_CLOSED') dropSession(sid, s);
+    fail(res, code === 'BROWSER_CLOSED' ? 'NO_SESSION' : code, code === 'BROWSER_CLOSED' ? '会话已失效，请重新登录' : message);
   }
 });
 
@@ -132,8 +159,10 @@ app.post('/api/checkin', upload.single('photo'), async (req, res) => {
     console.log('[checkin]', mask(s.username), result.code, result.message);
     res.json(result);
   } catch (e) {
-    console.error('[checkin] 异常', e);
-    fail(res, e.code || 'CHECKIN_ERROR', e.message || '打卡过程出错');
+    const { code, message } = normalizeError(e);
+    if (code === 'BROWSER_CLOSED') dropSession(sid, s);
+    console.error('[checkin] 异常', code, message);
+    fail(res, code === 'BROWSER_CLOSED' ? 'NO_SESSION' : code, code === 'BROWSER_CLOSED' ? '会话已失效，请重新登录' : message);
   } finally {
     fs.unlink(req.file.path, () => {});
   }
@@ -163,13 +192,27 @@ const server = app.listen(PORT, () => {
   console.log(`智能查寝打卡服务已启动: http://127.0.0.1:${PORT}`);
   console.log('手机与电脑在同一局域网时，用手机访问 http://<电脑局域网IP>:' + PORT);
 });
+server.on('error', (e) => {
+  if (e && e.code === 'EADDRINUSE') {
+    console.error(`端口 ${PORT} 已被占用：可能上次的服务还在运行（旧进程留着的 Chromium 也会一起占资源）。先结束旧进程再启动。`);
+    process.exit(1);
+  }
+  throw e;
+});
 
 async function shutdown() {
   console.log('\n正在关闭…');
   server.close();
+  // 各会话共用同一个浏览器，先关上下文再关浏览器
   for (const [, rec] of sessions) await rec.session.close().catch(() => {});
+  sessions.clear();
   await closeBrowser();
   process.exit(0);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// 兜底：进程异常退出时也尽量把 Chromium 收掉，避免下次启动时残留实例拖慢登录
+process.on('exit', () => {
+  closeBrowser().catch(() => {});
+});
